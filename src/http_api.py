@@ -98,6 +98,15 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"events": service.audit(role)})
+                elif path == "/api/snapshots":
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"snapshots": service.list_snapshots(role)})
+                elif path == "/api/conflicts":
+                    actor, role = self._identity()
+                    del actor
+                    status = parse_qs(urlparse(self.path).query).get("status", [None])[0]
+                    self._json(200, {"conflicts": service.list_conflicts(role, status)})
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
@@ -110,6 +119,16 @@ def make_handler(service: Service, static_dir: str):
                 body = self._body()
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif path == "/api/snapshots/import":
+                    self._json(200, service.import_changeset(
+                        body.get("request_no"), body.get("base_checkpoint"),
+                        body.get("changes"), actor, role))
+                elif path == "/api/snapshots/backfill":
+                    self._json(200, service.backfill_snapshot(actor, role))
+                elif path.startswith("/api/conflicts/") and path.endswith("/review"):
+                    conflict_id = int(path.split("/")[3])
+                    self._json(200, service.review_conflict(
+                        conflict_id, body.get("winning_request_no"), actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
@@ -119,6 +138,9 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/emergency-dispatch"):
+                    item_id = int(path.split("/")[3])
+                    self._json(200, service.dispatch_emergency(item_id, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
