@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .domain import (ConflictError, DomainError, NotFoundError, PermissionDenied,
-                     ValidationError)
+                     SyncWriteError, ValidationError)
 from .service import Service
 
 
@@ -65,21 +65,50 @@ def make_handler(service: Service, static_dir: str):
                 status = 403
             elif isinstance(exc, ConflictError):
                 status = 409
+            elif isinstance(exc, SyncWriteError):
+                status = 503
             elif isinstance(exc, ValueError):
                 status = 422
             elif isinstance(exc, DomainError):
                 status = 400
             else:
                 status = 500
-            self._json(status, {"error": exc.__class__.__name__, "message": str(exc)})
+            payload = {"error": exc.__class__.__name__, "message": str(exc)}
+            if isinstance(exc, SyncWriteError):
+                payload["request_no"] = exc.request_no
+                payload["checkpoint"] = exc.checkpoint
+            self._json(status, payload)
 
         def do_GET(self) -> None:
             try:
-                path = urlparse(self.path).path
+                parsed = urlparse(self.path)
+                path = parsed.path
+                query = parse_qs(parsed.query)
                 if path == "/health":
                     self._json(200, {"status": "ok"})
                 elif path == "/":
                     self._html(root / "index.html")
+                elif path == "/api/tasks":
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"tasks": service.list_tasks(role)})
+                elif path == "/api/candidates":
+                    actor, role = self._identity()
+                    del actor
+                    candidate_status = query.get("status", [None])[0]
+                    self._json(200, {"candidates": service.list_candidates(
+                        role, candidate_status)})
+                elif path == "/api/snapshot":
+                    actor, role = self._identity()
+                    del actor
+                    after = int(query.get("after", ["0"])[0] or "0")
+                    self._json(200, service.snapshot(role, after))
+                elif path == "/api/dispatches":
+                    actor, role = self._identity()
+                    del actor
+                    item_id = query.get("item_id", [None])[0]
+                    item_id = int(item_id) if item_id is not None else None
+                    self._json(200, {"dispatches": service.list_dispatches(role, item_id)})
                 elif path == "/api/items":
                     actor, role = self._identity()
                     del actor
@@ -108,8 +137,20 @@ def make_handler(service: Service, static_dir: str):
                 path = urlparse(self.path).path
                 actor, role = self._identity()
                 body = self._body()
-                if path == "/api/items":
+                if path == "/api/sync":
+                    self._json(200, service.submit_sync(body, actor, role))
+                elif path == "/api/snapshot/backfill":
+                    self._json(200, service.backfill_snapshots(role, actor or "system"))
+                elif path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif path.startswith("/api/candidates/") and path.endswith("/resolve"):
+                    candidate_id = int(path.split("/")[3])
+                    self._json(200, service.resolve_candidate(
+                        candidate_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/dispatch"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.dispatch_emergency(
+                        item_id, body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))

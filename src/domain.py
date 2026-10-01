@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 class ErrorKind:
-    VALIDATION="validation"; NOT_FOUND="not_found"; FORBIDDEN="forbidden"; CONFLICT="conflict"
+    VALIDATION="validation"; NOT_FOUND="not_found"; FORBIDDEN="forbidden"; CONFLICT="conflict"; UNAVAILABLE="unavailable"
 class DomainError(Exception):
     kind=ErrorKind.VALIDATION
     def __init__(self,message): super().__init__(message); self.message=message
@@ -10,6 +10,11 @@ class ValidationError(DomainError): kind=ErrorKind.VALIDATION
 class NotFoundError(DomainError): kind=ErrorKind.NOT_FOUND
 class PermissionDenied(DomainError): kind=ErrorKind.FORBIDDEN
 class ConflictError(DomainError): kind=ErrorKind.CONFLICT
+class SyncWriteError(DomainError):
+    """同步批次在写入阶段失败，可凭请求号与检查点重试。"""
+    kind=ErrorKind.UNAVAILABLE
+    def __init__(self,message,request_no=None,checkpoint=0):
+        super().__init__(message); self.request_no=request_no; self.checkpoint=checkpoint
 SEVERITIES=['observation', 'minor', 'major', 'emergency']; STATES=['planned', 'inspected', 'defect_confirmed', 'repair', 'verified', 'closed']; ROLES=['inspector', 'dam_engineer', 'emergency_manager', 'viewer']
 @dataclass(frozen=True)
 class Item:

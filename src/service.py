@@ -2,17 +2,21 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .domain import (ConflictError, ensure_role, normalize_severity,
+                     require_number, require_text)
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
-                    validate_transition)
+from .rules import (AUDIT_ROLES, CREATE_ROLES, DISPATCH_ROLES, ENTITY,
+                    RECORD_ROLES, REVIEW_ROLES, TERMINAL_STATES, VIEW_ROLES,
+                    completion_blockers, escalation_required, priority_score,
+                    response_deadline_hours, review_blockers,
+                    role_for_transition, validate_transition)
+from .sync import SyncEngine
 
 
 class Service:
     def __init__(self, repository: Repository):
         self.repository = repository
+        self.sync = SyncEngine(repository)
 
     def _view(self, role: str) -> None:
         ensure_role(role, VIEW_ROLES)
@@ -64,8 +68,9 @@ class Service:
         if not isinstance(expected_version, int) or expected_version < 1:
             raise ValueError("expected_version必须是正整数")
         blockers = completion_blockers(target, self.repository.open_record_count(item_id))
+        if target in TERMINAL_STATES:
+            blockers += review_blockers(self.repository.pending_candidate_count(item_id))
         if blockers:
-            from .domain import ConflictError
             raise ConflictError("；".join(blockers))
         updated = self.repository.transition_item(item_id, target, expected_version, actor)
         self.repository.append_audit("transition", ENTITY, item_id, actor, {
@@ -90,6 +95,69 @@ class Service:
     def audit(self, role: str, item_id: Optional[int] = None) -> list:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
+
+    # ------------------------------------------------------------------
+    # 断网续传
+    # ------------------------------------------------------------------
+    def submit_sync(self, payload: Dict[str, Any], actor: str,
+                    role: str) -> Dict[str, Any]:
+        return self.sync.submit_batch(payload, actor, role)
+
+    def list_tasks(self, role: str) -> list:
+        self._view(role)
+        return self.repository.list_tasks()
+
+    def list_candidates(self, role: str,
+                        status: Optional[str] = None) -> list:
+        ensure_role(role, REVIEW_ROLES)
+        return self.repository.list_candidates(status)
+
+    def resolve_candidate(self, candidate_id: int, payload: Dict[str, Any],
+                          actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, REVIEW_ROLES)
+        actor = require_text(actor, "actor", 100)
+        decision = payload.get("decision")
+        if decision not in ("accept", "reject"):
+            from .domain import ValidationError
+            raise ValidationError("decision必须是accept或reject")
+        note = payload.get("note", "")
+        if note is None:
+            note = ""
+        elif not isinstance(note, str):
+            from .domain import ValidationError
+            raise ValidationError("note必须是字符串")
+        note = note.strip()
+        if len(note) > 500:
+            from .domain import ValidationError
+            raise ValidationError("note不能超过500个字符")
+        return self.repository.resolve_candidate(candidate_id, decision, actor, note)
+
+    def dispatch_emergency(self, item_id: int, payload: Dict[str, Any],
+                           actor: str, role: str,
+                           request_no: Optional[str] = None) -> Dict[str, Any]:
+        ensure_role(role, DISPATCH_ROLES)
+        actor = require_text(actor, "actor", 100)
+        reason = require_text(payload.get("reason"), "reason", 2000)
+        item = self.repository.get_item(item_id)
+        blockers = review_blockers(self.repository.pending_candidate_count(item_id))
+        if blockers:
+            raise ConflictError("；".join(blockers))
+        return self.repository.create_dispatch(item_id, reason, actor, request_no)
+
+    def list_dispatches(self, role: str, item_id: Optional[int] = None) -> list:
+        ensure_role(role, DISPATCH_ROLES.union(AUDIT_ROLES))
+        return self.repository.list_dispatches(item_id)
+
+    def snapshot(self, role: str, after: int = 0) -> Dict[str, Any]:
+        self._view(role)
+        if not isinstance(after, int) or after < 0:
+            from .domain import ValidationError
+            raise ValidationError("after必须是非负整数")
+        return self.repository.get_snapshot(after)
+
+    def backfill_snapshots(self, role: str, actor: str = "system") -> Dict[str, int]:
+        ensure_role(role, REVIEW_ROLES)
+        return self.repository.backfill_snapshots(actor)
 
     @staticmethod
     def enrich(item: Dict[str, Any]) -> Dict[str, Any]:

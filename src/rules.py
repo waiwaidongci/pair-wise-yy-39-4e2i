@@ -1,8 +1,11 @@
 from __future__ import annotations
 from .domain import ConflictError, ValidationError
-TITLE='大坝巡检、缺陷与应急管理'; ENTITY='大坝缺陷'; ID_PREFIX='DS'
+TITLE='大坝巡检、缺陷与应急管理'; ENTITY='大坝缺陷'; ENTITY_TASK='巡检任务'; ENTITY_EMERGENCY='应急任务'; ENTITY_CANDIDATE='冲突候选'; ENTITY_SNAPSHOT='同步快照'; ID_PREFIX='DS'
 SEVERITIES=['observation', 'minor', 'major', 'emergency']; STATES=['planned', 'inspected', 'defect_confirmed', 'repair', 'verified', 'closed']; TRANSITIONS={'planned': ['inspected'], 'inspected': ['defect_confirmed'], 'defect_confirmed': ['repair'], 'repair': ['verified'], 'verified': ['closed'], 'closed': []}; TRANSITION_ROLES={'inspected': ['inspector'], 'defect_confirmed': ['dam_engineer'], 'repair': ['dam_engineer'], 'verified': ['inspector'], 'closed': ['emergency_manager']}
 CREATE_ROLES=set(['inspector']); RECORD_ROLES=set(['inspector', 'dam_engineer']); AUDIT_ROLES=set(['emergency_manager', 'viewer']); VIEW_ROLES=set(['inspector', 'dam_engineer', 'emergency_manager', 'viewer'])
+SYNC_ROLES=set(['inspector', 'dam_engineer']); REVIEW_ROLES=set(['dam_engineer', 'emergency_manager']); DISPATCH_ROLES=set(['emergency_manager'])
+# 巡检任务在断网期间允许被两队各自改期/改线，回网后按任务号合并
+TASK_STATUSES=['planned', 'rescheduled', 'in_progress', 'completed']
 SEVERITY_WEIGHT={'observation': 1.0, 'minor': 3.0, 'major': 6.0, 'emergency': 9.0}; DEADLINE_HOURS={'observation': 72, 'minor': 24, 'major': 8, 'emergency': 4}; TERMINAL_STATES=set(['closed'])
 def priority_score(severity,quantity=0.0,threshold=1.0,open_records=0):
     if severity not in SEVERITY_WEIGHT: raise ValidationError("unknown severity")
@@ -20,3 +23,11 @@ def validate_transition(current,target):
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
 def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))
+
+def review_blockers(pending_candidates):
+    """同一缺陷存在待复核的合并候选时，不能关闭或派发应急任务。"""
+    return ["存在待复核的合并冲突，复核前不能关闭或派发应急任务"] if pending_candidates>0 else []
+
+def normalize_task_status(value):
+    if value not in TASK_STATUSES: raise ValidationError("task_status不在允许范围内")
+    return value
